@@ -157,7 +157,7 @@ if __name__ == '__main__':
     assert opt.corrupt is not None
 
     # one-time download: ADM checkpoint
-    download_ckpt("/pscratch/sd/v/vmikuni/FM/data/")
+    download_ckpt(os.path.join(opt.scratch,"data/"))
     
     if opt.distributed:
         size = opt.n_gpu_per_node
