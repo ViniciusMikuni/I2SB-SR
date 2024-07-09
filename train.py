@@ -23,13 +23,14 @@ from torch.multiprocessing import Process
 from logger import Logger
 from distributed_util import init_processes
 from corruption import build_corruption
-from dataset import imagenet
+from nskt import get_data_loader
 from i2sb import Runner, download_ckpt
 
 import colored_traceback.always
 from ipdb import set_trace as debug
 
-RESULT_DIR = Path("results")
+
+
 
 def set_seed(seed):
     # https://github.com/pytorch/pytorch/issues/7068
@@ -51,6 +52,7 @@ def create_training_options():
     parser.add_argument("--master-address", type=str,   default='localhost', help="address for master")
     parser.add_argument("--node-rank",      type=int,   default=0,           help="the index of node")
     parser.add_argument("--num-proc-node",  type=int,   default=1,           help="The number of nodes in multi node env")
+    parser.add_argument("--scratch",        type=str,   default="/pscratch/sd/v/vmikuni/FM/",help="Path to scratch area")
     # parser.add_argument("--amp",            action="store_true")
 
     # --------------- SB model ---------------
@@ -58,7 +60,7 @@ def create_training_options():
     parser.add_argument("--corrupt",        type=str,   default=None,        help="restoration task")
     parser.add_argument("--t0",             type=float, default=1e-4,        help="sigma start time in network parametrization")
     parser.add_argument("--T",              type=float, default=1.,          help="sigma end time in network parametrization")
-    parser.add_argument("--interval",       type=int,   default=1000,        help="number of interval")
+    parser.add_argument("--interval",       type=int,   default=100,        help="number of interval")
     parser.add_argument("--beta-max",       type=float, default=0.3,         help="max diffusion for the diffusion model")
     # parser.add_argument("--beta-min",       type=float, default=0.1)
     parser.add_argument("--ot-ode",         action="store_true",             help="use OT-ODE model")
@@ -72,11 +74,11 @@ def create_training_options():
     parser.add_argument("--batch-size",     type=int,   default=256)
     parser.add_argument("--microbatch",     type=int,   default=2,           help="accumulate gradient over microbatch until full batch-size")
     parser.add_argument("--num-itr",        type=int,   default=1000000,     help="training iteration")
-    parser.add_argument("--lr",             type=float, default=5e-5,        help="learning rate")
+    parser.add_argument("--lr",             type=float, default=5e-4,        help="learning rate")
     parser.add_argument("--lr-gamma",       type=float, default=0.99,        help="learning rate decay ratio")
     parser.add_argument("--lr-step",        type=int,   default=1000,        help="learning rate decay step size")
     parser.add_argument("--l2-norm",        type=float, default=0.0)
-    parser.add_argument("--ema",            type=float, default=0.99)
+    parser.add_argument("--ema",            type=float, default=0.999)
 
     # --------------- path and logging ---------------
     parser.add_argument("--dataset-dir",    type=Path,  default="/dataset",  help="path to LMDB dataset")
@@ -99,6 +101,7 @@ def create_training_options():
         opt.ngc_job_id = os.environ["NGC_JOB_ID"]
 
     # ========= path handle =========
+    RESULT_DIR = Path(os.path.join(opt.scratch,"results"))
     os.makedirs(opt.log_dir, exist_ok=True)
     opt.ckpt_path = RESULT_DIR / opt.name
     os.makedirs(opt.ckpt_path, exist_ok=True)
@@ -126,9 +129,14 @@ def main(opt):
     if opt.seed is not None:
         set_seed(opt.seed + opt.global_rank)
 
+
     # build imagenet dataset
-    train_dataset = imagenet.build_lmdb_dataset(opt, log, train=True)
-    val_dataset   = imagenet.build_lmdb_dataset(opt, log, train=False)
+    train_dataset = get_data_loader(os.path.join(opt.scratch,'nskt_tensor',
+                                                 '16000_2048_2048_seed_3407_uvw.h5'))
+
+
+    val_dataset   = get_data_loader(os.path.join(opt.scratch,'nskt_tensor',
+                                                 '16000_2048_2048_seed_3407_uvw.h5'))
     # note: images should be normalized to [-1,1] for corruption methods to work properly
 
     if opt.corrupt == "mixture":
@@ -149,8 +157,8 @@ if __name__ == '__main__':
     assert opt.corrupt is not None
 
     # one-time download: ADM checkpoint
-    download_ckpt("data/")
-
+    download_ckpt("/pscratch/sd/v/vmikuni/FM/data/")
+    
     if opt.distributed:
         size = opt.n_gpu_per_node
 

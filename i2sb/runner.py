@@ -84,7 +84,7 @@ class Runner(object):
         log.info(f"[Diffusion] Built I2SB diffusion: steps={len(betas)}!")
 
         noise_levels = torch.linspace(opt.t0, opt.T, opt.interval, device=opt.device) * opt.interval
-        self.net = Image256Net(log, noise_levels=noise_levels, use_fp16=opt.use_fp16, cond=opt.cond_x1)
+        self.net = Image256Net(log, noise_levels=noise_levels, use_fp16=opt.use_fp16, cond=opt.cond_x1,ckpt_dir = os.path.join(opt.scratch,'data'),pretrained_adm=True)
         self.ema = ExponentialMovingAverage(self.net.parameters(), decay=opt.ema)
 
         if opt.load:
@@ -98,6 +98,7 @@ class Runner(object):
         self.ema.to(opt.device)
 
         self.log = log
+        self.path = opt.ckpt_path
 
     def compute_label(self, step, x0, xt):
         """ Eq 12 """
@@ -121,11 +122,12 @@ class Runner(object):
             with torch.no_grad():
                 corrupt_img, mask = corrupt_method(clean_img.to(opt.device))
         else:
-            clean_img, y = next(loader)
+            clean_img= next(loader)
+
             with torch.no_grad():
                 corrupt_img = corrupt_method(clean_img.to(opt.device))
             mask = None
-
+            y = torch.from_numpy(np.ones(corrupt_img.shape[0])).to(opt.device)
         # os.makedirs(".debug", exist_ok=True)
         # tu.save_image((clean_img+1)/2, ".debug/clean.png", nrow=4)
         # tu.save_image((corrupt_img+1)/2, ".debug/corrupt.png", nrow=4)
@@ -157,7 +159,6 @@ class Runner(object):
         train_loader = util.setup_loader(train_dataset, opt.microbatch)
         val_loader   = util.setup_loader(val_dataset,   opt.microbatch)
 
-        self.accuracy = torchmetrics.Accuracy().to(opt.device)
         self.resnet = build_resnet50().to(opt.device)
 
         net.train()
@@ -199,7 +200,7 @@ class Runner(object):
             if it % 10 == 0:
                 self.writer.add_scalar(it, 'loss', loss.detach())
 
-            if it % 5000 == 0:
+            if it % 50 == 0:
                 if opt.global_rank == 0:
                     torch.save({
                         "net": self.net.state_dict(),
@@ -211,7 +212,6 @@ class Runner(object):
                 if opt.distributed:
                     torch.distributed.barrier()
 
-            if it == 500 or it % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
                 net.eval()
                 self.evaluation(opt, it, val_loader, corrupt_method)
                 net.train()
@@ -272,6 +272,8 @@ class Runner(object):
 
         log.info("Collecting tensors ...")
         img_clean   = all_cat_cpu(opt, log, img_clean)
+        #Downsample back the image to the original dimension
+        #img_corrupt = F.interpolate(img_corrupt, size=(64, 64), mode='nearest')
         img_corrupt = all_cat_cpu(opt, log, img_corrupt)
         y           = all_cat_cpu(opt, log, y)
         xs          = all_cat_cpu(opt, log, xs)
@@ -286,23 +288,22 @@ class Runner(object):
         def log_image(tag, img, nrow=10):
             self.writer.add_image(it, tag, tu.make_grid((img+1)/2, nrow=nrow)) # [1,1] -> [0,1]
 
-        def log_accuracy(tag, img):
-            pred = self.resnet(img.to(opt.device)) # input range [-1,1]
-            accu = self.accuracy(pred, y.to(opt.device))
-            self.writer.add_scalar(it, tag, accu)
-
         log.info("Logging images ...")
         img_recon = xs[:, 0, ...]
+        
         log_image("image/clean",   img_clean)
         log_image("image/corrupt", img_corrupt)
         log_image("image/recon",   img_recon)
         log_image("debug/pred_clean_traj", pred_x0s.reshape(-1, *xdim), nrow=len_t)
         log_image("debug/recon_traj",      xs.reshape(-1, *xdim),      nrow=len_t)
 
-        log.info("Logging accuracies ...")
-        log_accuracy("accuracy/clean",   img_clean)
-        log_accuracy("accuracy/corrupt", img_corrupt)
-        log_accuracy("accuracy/recon",   img_recon)
+        #Create npy files for quick inspection
+        file_name = os.path.join(self.path,f'image_{it}.npz')
+        
+        np.savez(file_name, low_res=img_corrupt,
+                 high_res=img_clean,
+                 super_res=img_recon)
+                                 
 
         log.info(f"========== Evaluation finished: iter={it} ==========")
         torch.cuda.empty_cache()
